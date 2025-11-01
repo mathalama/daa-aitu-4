@@ -75,16 +75,22 @@ public class GraphAlgorithmsIntegrationTest {
                                       ArrayNode results,
                                       BufferedWriter csv) throws Exception {
 
+        ObjectMapper mapper = new ObjectMapper();
+
+        // 1) build graphs
         List<List<Integer>> adj = buildAdj(ds);
         List<List<int[]>> adjW = buildWeightedAdj(ds);
 
-        // Run SCC
+        // 2) run SCC
         MetricsTracker sccM = new MetricsTracker();
         TarjanSCC scc = new TarjanSCC(adj, sccM);
         List<List<Integer>> comps = scc.run();
         int compCount = comps.size();
+
+        // vertex -> component id
         int[] compOf = SCCUtils.buildVertexToComp(comps, ds.n);
 
+        // metrics for other parts
         MetricsTracker topoM = new MetricsTracker();
         MetricsTracker shortM = new MetricsTracker();
         MetricsTracker longM = new MetricsTracker();
@@ -93,11 +99,12 @@ public class GraphAlgorithmsIntegrationTest {
         List<List<int[]>> dagWeighted;
         int srcComp;
 
-        // Determine if graph is already a DAG
+        // 3) decide: original DAG or condensation
         if (compCount == ds.n) {
+            // try topo on original
             topoOrder = KahnTopologicalSort.topo(adj, topoM);
             if (topoOrder.size() < ds.n) {
-                // fallback: condensation due to self-loop or hidden cycle
+                // still cyclic -> use condensation
                 List<List<Integer>> cond = CondensationBuilder.buildCondensation(adj, comps);
                 List<List<int[]>> condW = CondensationBuilder.buildWeightedCondensation(adj, adjW, comps);
                 topoOrder = KahnTopologicalSort.topo(cond, topoM);
@@ -105,12 +112,13 @@ public class GraphAlgorithmsIntegrationTest {
                 int originalSrc = (ds.source != null) ? ds.source : 0;
                 srcComp = compOf[originalSrc];
             } else {
+                // original is DAG
                 dagWeighted = adjW;
                 int originalSrc = (ds.source != null) ? ds.source : 0;
                 srcComp = originalSrc;
             }
         } else {
-            // Condense to DAG of components
+            // multiple SCCs -> build condensation
             List<List<Integer>> cond = CondensationBuilder.buildCondensation(adj, comps);
             List<List<int[]>> condW = CondensationBuilder.buildWeightedCondensation(adj, adjW, comps);
             topoOrder = KahnTopologicalSort.topo(cond, topoM);
@@ -119,23 +127,96 @@ public class GraphAlgorithmsIntegrationTest {
             srcComp = compOf[originalSrc];
         }
 
-        // DAG shortest path
-        DAGShortestPath.shortestFrom(srcComp, topoOrder, dagWeighted, shortM);
+        // 4) DAG shortest path: in your project it returns int[]
+        int[] dist = DAGShortestPath.shortestFrom(srcComp, topoOrder, dagWeighted, shortM);
 
-        // DAG longest path
+        // 5) DAG longest path: returns LongestResult(dist, parent)
         DAGLongestPath.LongestResult longRes =
                 DAGLongestPath.longestFrom(srcComp, topoOrder, dagWeighted, longM);
-        int[] longDist = longRes.dist();
-        int maxLen = Arrays.stream(longDist)
-                .filter(v -> v > Integer.MIN_VALUE)
-                .max().orElse(0);
 
-        // JSON entry
-        ObjectMapper mapper = new ObjectMapper();
+        int[] longDist = longRes.dist();
+
+        // find vertex with max distance
+        int bestV = -1;
+        int maxLen = Integer.MIN_VALUE;
+        for (int v = 0; v < longDist.length; v++) {
+            if (longDist[v] > maxLen) {
+                maxLen = longDist[v];
+                bestV = v;
+            }
+        }
+        if (maxLen == Integer.MIN_VALUE) {
+            maxLen = 0;
+            bestV = srcComp;
+        }
+
+        // rebuild critical path using existing method
+        List<Integer> critPath = DAGLongestPath.rebuildPath(bestV, longRes);
+
+        // 6) build JSON for this dataset
         ObjectNode one = mapper.createObjectNode();
         one.put("file", name);
         one.put("vertices", ds.n);
         one.put("edges", ds.edges.size());
+        if (ds.weight_model != null) {
+            one.put("weight_model", ds.weight_model);
+        }
+
+        // 6.1 SCC list
+        ArrayNode sccArr = mapper.createArrayNode();
+        for (int cid = 0; cid < comps.size(); cid++) {
+            List<Integer> compVerts = comps.get(cid);
+            ObjectNode cNode = mapper.createObjectNode();
+            cNode.put("id", cid);
+            cNode.put("size", compVerts.size());
+            ArrayNode vs = mapper.createArrayNode();
+            for (int v : compVerts) {
+                vs.add(v);
+            }
+            cNode.set("vertices", vs);
+            sccArr.add(cNode);
+        }
+        one.set("scc", sccArr);
+
+        // 6.2 component topo order
+        ArrayNode topoArr = mapper.createArrayNode();
+        for (int c : topoOrder) {
+            topoArr.add(c);
+        }
+        one.set("componentTopo", topoArr);
+
+        // 6.3 expanded order (components -> original vertices)
+        ArrayNode taskOrder = mapper.createArrayNode();
+        for (int c : topoOrder) {
+            if (c < comps.size()) {
+                for (int v : comps.get(c)) {
+                    taskOrder.add(v);
+                }
+            }
+        }
+        one.set("taskOrder", taskOrder);
+
+        // 6.4 shortest distances (no path, because your class does not store parents)
+        ObjectNode shortestNode = mapper.createObjectNode();
+        shortestNode.put("sourceComp", srcComp);
+        ArrayNode distArr = mapper.createArrayNode();
+        for (int d : dist) {
+            distArr.add(d);
+        }
+        shortestNode.set("dist", distArr);
+        one.set("shortest", shortestNode);
+
+        // 6.5 critical path
+        ObjectNode critNode = mapper.createObjectNode();
+        critNode.put("length", maxLen);
+        ArrayNode cpArr = mapper.createArrayNode();
+        for (int v : critPath) {
+            cpArr.add(v);
+        }
+        critNode.set("path", cpArr);
+        one.set("criticalPath", critNode);
+
+        // 6.6 metrics
         one.put("Tarjan_SCC_count", compCount);
         one.put("Tarjan_time_ms", sccM.getElapsedMs());
         one.put("Tarjan_DFS_ops", sccM.getDfsOps());
@@ -146,10 +227,11 @@ public class GraphAlgorithmsIntegrationTest {
         one.put("DAGSP_long_time_ms", longM.getElapsedMs());
         one.put("DAGSP_long_relax_ops", longM.getRelaxOps());
         one.put("DAGSP_long_max", maxLen);
-        if (ds.weight_model != null) one.put("weight_model", ds.weight_model);
+
+        // add to global JSON array
         results.add(one);
 
-        // CSV row
+        // 7) CSV stays the same
         csv.write(String.join(",",
                 name,
                 String.valueOf(ds.n),
