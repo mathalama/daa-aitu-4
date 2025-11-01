@@ -5,7 +5,9 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import graph.dagsp.DAGShortestPath;
 import graph.dagsp.DAGLongestPath;
 import graph.scc.TarjanSCC;
+import graph.scc.CondensationBuilder;
 import graph.topo.KahnTopologicalSort;
+import graph.util.SCCUtils;
 import metrics.MetricsTracker;
 import org.junit.jupiter.api.Test;
 
@@ -14,9 +16,8 @@ import java.nio.file.*;
 import java.util.*;
 
 /**
- * Runs TarjanSCC, KahnTopologicalSort, DAGShortestPath, and DAGLongestPath
- * on all JSON datasets in /data.
- * Saves metrics to data/output.json and data/metrics.csv.
+ * Integration test that runs SCC → Condensation → Topo → DAG-SP
+ * on every JSON dataset in /data and writes metrics.
  */
 public class GraphAlgorithmsIntegrationTest {
 
@@ -24,10 +25,10 @@ public class GraphAlgorithmsIntegrationTest {
     private static final Path OUT_JSON = DATA_DIR.resolve("output.json");
     private static final Path OUT_CSV = DATA_DIR.resolve("metrics.csv");
 
-    /** Edge format from JSON file. */
+    /** Edge format in JSON. */
     public static class EdgeDTO { public int u, v, w; }
 
-    /** Graph dataset structure. */
+    /** Dataset format for JSON files. */
     public static class DatasetDTO {
         public boolean directed;
         public int n;
@@ -42,7 +43,7 @@ public class GraphAlgorithmsIntegrationTest {
         ArrayNode results = mapper.createArrayNode();
 
         if (!Files.exists(DATA_DIR)) throw new IllegalStateException("data/ folder missing");
-        Files.deleteIfExists(OUT_CSV); // clean old csv
+        Files.deleteIfExists(OUT_CSV);
 
         try (BufferedWriter csv = Files.newBufferedWriter(OUT_CSV, StandardOpenOption.CREATE)) {
             csv.write("file,vertices,edges,"
@@ -63,46 +64,73 @@ public class GraphAlgorithmsIntegrationTest {
 
         ObjectNode root = new ObjectMapper().createObjectNode();
         root.set("results", results);
-        new ObjectMapper().writerWithDefaultPrettyPrinter().writeValue(OUT_JSON.toFile(), root);
+        new ObjectMapper()
+                .writerWithDefaultPrettyPrinter()
+                .writeValue(OUT_JSON.toFile(), root);
     }
 
-    /** Runs all algorithms on one dataset and writes results. */
-    private static void runAlgorithms(DatasetDTO ds, String name, ArrayNode results, BufferedWriter csv) throws Exception {
+    /** Executes all algorithms on a single dataset and writes metrics. */
+    private static void runAlgorithms(DatasetDTO ds,
+                                      String name,
+                                      ArrayNode results,
+                                      BufferedWriter csv) throws Exception {
+
         List<List<Integer>> adj = buildAdj(ds);
         List<List<int[]>> adjW = buildWeightedAdj(ds);
 
+        // Run SCC
         MetricsTracker sccM = new MetricsTracker();
         TarjanSCC scc = new TarjanSCC(adj, sccM);
         List<List<Integer>> comps = scc.run();
         int compCount = comps.size();
+        int[] compOf = SCCUtils.buildVertexToComp(comps, ds.n);
 
         MetricsTracker topoM = new MetricsTracker();
         MetricsTracker shortM = new MetricsTracker();
         MetricsTracker longM = new MetricsTracker();
 
-        // if DAG → use original, else condensation
         List<Integer> topoOrder;
         List<List<int[]>> dagWeighted;
-        int src;
+        int srcComp;
 
+        // Determine if graph is already a DAG
         if (compCount == ds.n) {
             topoOrder = KahnTopologicalSort.topo(adj, topoM);
-            dagWeighted = adjW;
-            src = (ds.source != null) ? ds.source : 0;
+            if (topoOrder.size() < ds.n) {
+                // fallback: condensation due to self-loop or hidden cycle
+                List<List<Integer>> cond = CondensationBuilder.buildCondensation(adj, comps);
+                List<List<int[]>> condW = CondensationBuilder.buildWeightedCondensation(adj, adjW, comps);
+                topoOrder = KahnTopologicalSort.topo(cond, topoM);
+                dagWeighted = condW;
+                int originalSrc = (ds.source != null) ? ds.source : 0;
+                srcComp = compOf[originalSrc];
+            } else {
+                dagWeighted = adjW;
+                int originalSrc = (ds.source != null) ? ds.source : 0;
+                srcComp = originalSrc;
+            }
         } else {
-            List<List<Integer>> cond = buildCondensation(adj, comps);
+            // Condense to DAG of components
+            List<List<Integer>> cond = CondensationBuilder.buildCondensation(adj, comps);
+            List<List<int[]>> condW = CondensationBuilder.buildWeightedCondensation(adj, adjW, comps);
             topoOrder = KahnTopologicalSort.topo(cond, topoM);
-            dagWeighted = weightCond(cond);
-            src = 0;
+            dagWeighted = condW;
+            int originalSrc = (ds.source != null) ? ds.source : 0;
+            srcComp = compOf[originalSrc];
         }
 
-        // shortest
-        DAGShortestPath.shortestFrom(src, topoOrder, dagWeighted, shortM);
-        // longest (critical)
-        int[] longDist = DAGLongestPath.longestFrom(src, topoOrder, dagWeighted, longM);
-        int maxLen = Arrays.stream(longDist).filter(v -> v > Integer.MIN_VALUE).max().orElse(0);
+        // DAG shortest path
+        DAGShortestPath.shortestFrom(srcComp, topoOrder, dagWeighted, shortM);
 
-        // JSON result
+        // DAG longest path
+        DAGLongestPath.LongestResult longRes =
+                DAGLongestPath.longestFrom(srcComp, topoOrder, dagWeighted, longM);
+        int[] longDist = longRes.dist();
+        int maxLen = Arrays.stream(longDist)
+                .filter(v -> v > Integer.MIN_VALUE)
+                .max().orElse(0);
+
+        // JSON entry
         ObjectMapper mapper = new ObjectMapper();
         ObjectNode one = mapper.createObjectNode();
         one.put("file", name);
@@ -118,9 +146,10 @@ public class GraphAlgorithmsIntegrationTest {
         one.put("DAGSP_long_time_ms", longM.getElapsedMs());
         one.put("DAGSP_long_relax_ops", longM.getRelaxOps());
         one.put("DAGSP_long_max", maxLen);
+        if (ds.weight_model != null) one.put("weight_model", ds.weight_model);
         results.add(one);
 
-        // CSV record
+        // CSV row
         csv.write(String.join(",",
                 name,
                 String.valueOf(ds.n),
@@ -139,7 +168,7 @@ public class GraphAlgorithmsIntegrationTest {
         csv.write("\n");
     }
 
-    /** Builds adjacency list. */
+    /** Builds adjacency list from dataset. */
     private static List<List<Integer>> buildAdj(DatasetDTO ds) {
         List<List<Integer>> g = new ArrayList<>();
         for (int i = 0; i < ds.n; i++) g.add(new ArrayList<>());
@@ -147,7 +176,7 @@ public class GraphAlgorithmsIntegrationTest {
         return g;
     }
 
-    /** Builds weighted adjacency list. */
+    /** Builds weighted adjacency list from dataset. */
     private static List<List<int[]>> buildWeightedAdj(DatasetDTO ds) {
         List<List<int[]>> g = new ArrayList<>();
         for (int i = 0; i < ds.n; i++) g.add(new ArrayList<>());
@@ -156,33 +185,5 @@ public class GraphAlgorithmsIntegrationTest {
             g.get(e.u).add(new int[]{e.v, w});
         }
         return g;
-    }
-
-    /** Assigns weight=1 for condensation DAG. */
-    private static List<List<int[]>> weightCond(List<List<Integer>> cond) {
-        List<List<int[]>> w = new ArrayList<>();
-        for (int i = 0; i < cond.size(); i++) w.add(new ArrayList<>());
-        for (int v = 0; v < cond.size(); v++)
-            for (int to : cond.get(v))
-                w.get(v).add(new int[]{to, 1});
-        return w;
-    }
-
-    /** Builds condensation DAG (each SCC becomes a node). */
-    private static List<List<Integer>> buildCondensation(List<List<Integer>> g, List<List<Integer>> comps) {
-        int[] comp = new int[g.size()];
-        for (int id = 0; id < comps.size(); id++)
-            for (int v : comps.get(id)) comp[v] = id;
-
-        List<List<Integer>> dag = new ArrayList<>();
-        for (int i = 0; i < comps.size(); i++) dag.add(new ArrayList<>());
-
-        Set<String> seen = new HashSet<>();
-        for (int v = 0; v < g.size(); v++)
-            for (int to : g.get(v)) {
-                int a = comp[v], b = comp[to];
-                if (a != b && seen.add(a + "-" + b)) dag.get(a).add(b);
-            }
-        return dag;
     }
 }
