@@ -3,7 +3,7 @@ package metrics;
 /**
  * Tracks execution time and operation counts for graph algorithms.
  */
-public final class metricsTracker implements metrics {
+public final class MetricsTracker implements Metrics {
 
     private long startNs;
     private long elapsedNs;

@@ -1,6 +1,6 @@
 package metrics;
 
-public interface metrics {
+public interface Metrics {
     void start();
     void stop();
 
