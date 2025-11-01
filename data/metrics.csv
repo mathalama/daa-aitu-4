@@ -1,0 +1,10 @@
+file,vertices,edges,Tarjan_SCC_count,Tarjan_time_ms,Tarjan_DFS_ops,Kahn_time_ms,Kahn_queue_ops,DAGSP_short_time_ms,DAGSP_short_relax_ops,DAGSP_long_time_ms,DAGSP_long_relax_ops,DAGSP_long_max
+large1.json,20,39,12,0.0376,20,0.0116,24,0.0076,0,0.0083,0,0
+large2.json,24,58,7,0.0129,24,0.005,14,0.0018,0,8.0E-4,0,0
+large3.json,30,94,30,0.0178,30,0.0181,60,0.015,48,0.0125,69,53
+medium1.json,12,13,10,0.0082,12,0.0055,20,0.0013,0,9.0E-4,0,0
+medium2.json,15,17,10,0.0067,15,0.0071,20,0.0011,0,9.0E-4,0,0
+medium3.json,18,19,16,0.0081,18,0.0083,32,0.0014,0,0.0018,0,0
+small1.json,6,6,6,0.0034,6,0.0036,12,0.0018,5,0.0023,6,16
+small2.json,7,7,5,0.0047,7,0.0031,10,8.0E-4,0,5.0E-4,0,0
+small3.json,8,9,4,0.0272,8,0.0038,8,8.0E-4,0,6.0E-4,0,0
